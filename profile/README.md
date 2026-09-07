@@ -12,6 +12,7 @@ OpenGPGPU 以 GPU 硬件为核心，覆盖从 Chisel RTL、SIMT 计算与图形�
 | **[gpu](https://github.com/OpenGPGPU/gpu)** | RISC-V SIMT GPU 主项目 | Chisel 7.x RTL、RV32IMF(+V) 执行、统一着色、固定功能图形流水线、缓存与共享内存、Linux DRM/KMS 驱动 |
 | [arti](https://github.com/OpenGPGPU/arti) | RTL 到全系统仿真 | 自动识别 AXI/APB/AHB 等总线，将 Verilated RTL 嵌入 QEMU，让 Linux 通过 MMIO、IRQ 和共享内存直接驱动硬件模型 |
 | [chipagent](https://github.com/OpenGPGPU/chipagent) | EDA 工具服务层 | 封装 Verilator、Yosys、OpenSTA、OpenROAD 等真实工具，为仿真、综合、时序、PPA 和物理设计提供可复现反馈 |
+| [flashsim](https://github.com/OpenGPGPU/flashsim) | 周期精确 RTL 仿真器 | 基于 CIRCT 导入 RTL 并生成 C++，通过跳过空闲组合逻辑锥加速仿真；与 Verilator 逐周期对齐，GPU 规模设计可获得数倍到数十倍加速，并可替代 Verilator 嵌入 ARTI/QEMU |
 
 ## GPU 架构
 
@@ -83,5 +84,6 @@ Linux，加载 GPU 驱动，并验证渲染、GEM、atomic modeset 与 page flip
 - 建立更完整的 Linux 图形软件栈与全系统回归。
 
 想了解实现细节，请从 **[gpu](https://github.com/OpenGPGPU/gpu)** 开始；全系统
-集成与 EDA 验证分别参见 [ARTI](https://github.com/OpenGPGPU/arti) 和
-[ChipAgent](https://github.com/OpenGPGPU/chipagent)。
+集成、EDA 验证与快速 RTL 仿真分别参见 [ARTI](https://github.com/OpenGPGPU/arti)、
+[ChipAgent](https://github.com/OpenGPGPU/chipagent) 和
+[FlashSim](https://github.com/OpenGPGPU/flashsim)。
