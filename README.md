@@ -6,3 +6,5 @@ This repository maintains the public profile for the
 The profile content lives in [`profile/README.md`](profile/README.md). Open it
 to learn about the RISC-V SIMT GPU and its full-system simulation and EDA
 toolchain.
+
+**Current repositories:** gpu (Scala/Chisel), FlashSim (SystemVerilog), arti (Python), chipagent (Python)
