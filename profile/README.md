@@ -7,13 +7,12 @@ OpenGPGPU 以 GPU 硬件为核心，覆盖从 Chisel RTL、SIMT 计算与图形�
 
 ## 核心项目
 
-| 项目 | 定位 | 主要内容 | 语言 | 更新 |
-|---|---|---|---|---|
-| **[gpu](https://github.com/OpenGPGPU/gpu)** | RISC-V SIMT GPU 主项目 | Chisel 7.x RTL、RV32IMF(+V) 执行、统一着色、固定功能图形流水线、缓存与共享内存、Linux DRM/KMS 驱动 | Scala | 2026-09-18 |
-| **[FlashSim](https://github.com/OpenGPGPU/FlashSim)** | 周期精确 RTL 仿真器 | 基于 CIRCT 导入 RTL 并生成 C++，通过跳过空闲组合逻辑锥加速仿真；与 Verilator 逐周期对齐，GPU 规模设计可获得数倍到数十倍加速，并可替代 Verilator 嵌入 ARTI/QEMU | SystemVerilog | 2026-09-16 |
-| **[arti](https://github.com/OpenGPGPU/arti)** | RTL 到全系统仿真 | 自动识别 AXI/APB/AHB 等总线，将 Verilated RTL 嵌入 QEMU，让 Linux 通过 MMIO、IRQ 和共享内存直接驱动硬件模型 | Python | 2026-09-11 |
-| **[chipagent](https://github.com/OpenGPGPU/chipagent)** | EDA 工具服务层 | 封装 Verilator、Yosys、OpenSTA、OpenROAD 等真实工具，为仿真、综合、时序、PPA 和物理设计提供可复现反馈 | Python | 2026-09-08 |
-
+| 项目 | 定位 | 主要内容 | 语言 |
+|---|---|---|---|
+| **[gpu](https://github.com/OpenGPGPU/gpu)** | RISC-V SIMT GPU 主项目 | Chisel 7.x RTL，RV32IMF + RVV 向量与浮点流水线；统一着色（vertex/fragment 复用 SIMT）+ 固定功能（clip/raster/插值/output merger/depth-stencil-blend）、Sv32 私有 VA/ASID 与图形 TLB、统一命令（render/compute/copy/fill/blit/strided/resolve/invalidate）、L1/L2 + 共享内存；Linux DRM/KMS 含硬件 vblank IRQ、render-to-KMS present（triangle_present/pipe_present + pipe_opengpu Gallium 雏形）、Debian console（64×64 scanout）、MSAA 1x/2x/4x 与 resolve；默认 8 线程 Verilator，支持 FlashSim 双后端 | Scala |
+| **[FlashSim](https://github.com/OpenGPGPU/FlashSim)** | 周期精确 RTL 仿真器 | 基于 CIRCT（firtool/circt-opt/circt-verilog）导入 HW/Comb/Seq 并生成可跳过空闲组合锥的 C++；与 Verilator 逐周期对齐；单测 GpuSystem ~77×/GpuHostAxi ~17× vs 1T Verilator，ARTI QEMU+Linux 真实链路 ~3.0× wall-clock（5–6s vs 19s）；顶层门需求提升、兄弟 &/\| 前缀 CSE、NBA 右侧 dmux 分块等优化，可替代 Verilator 嵌入 ARTI/QEMU | Python/C++ |
+| **[arti](https://github.com/OpenGPGPU/arti)** | RTL 到全系统仿真 | 自动识别 AXI4/AXI-Lite/APB/AHB/AXI-Stream 并生成 SystemC/Verilator 与 QEMU 嵌入模型；自动发现 IRQ 并接线至 GIC + 100μs 轮询；支持 guest-memory 动态 scanout（BASE/stride/control/宽高寄存器、refresh 定时、RGBA 转换）、固定 VRAM simple-framebuffer、console 启动；默认 8 线程 Verilator、Debian cloud-init、外部驱动 KO 依赖自动载入、present 自动演示与 ARTI/FlashSim 后端对比 | Python |
+| **[chipagent](https://github.com/OpenGPGPU/chipagent)** | EDA 工具服务层 | 56 个 MCP 工具封装 Yosys/OpenSTA/OpenROAD 等真实工具；覆盖综合、ASAP7 ORFS 到 DEF/GDS、post-route STA、仿真/波形事务分析、对齐检查与 PPA 评估；支持 SV 参数 DSE、多文件 RTL、macro GDS/固定布局、按子串定点 high-fanout 拆分、时钟端口自探测与 Docker/host 双执行 | Python |
 
 ## GPU 架构
 
@@ -22,12 +21,12 @@ OpenGPGPU 以 GPU 硬件为核心，覆盖从 Chisel RTL、SIMT 计算与图形�
 完成。
 
 ```text
-Linux / DRM userspace
-        │
-Linux DRM/KMS driver ── MMIO + IRQ + shared memory
-        │
-  AXI host interface
-        │
+Linux / DRM userspace ── pipe_opengpu / triangle_present
+         │
+Linux DRM/KMS driver ── MMIO + IRQ(vblank/completion) + shared memory
+         │
+   AXI host interface (control) + AXI memory master
+         │
 ┌───────▼──────────────────────────────────────────────┐
 │                    OpenGPGPU                         │
 │                                                     │
@@ -41,16 +40,22 @@ Linux DRM/KMS driver ── MMIO + IRQ + shared memory
 │                                                     │
 │           Shared L1/L2 and host physical memory     │
 └─────────────────────────────────────────────────────┘
+         │
+  ARTI guest-memory GraphicHwOps ── QEMU scanout
 ```
 
 当前实现重点包括：
 
-- 参数化硬件 warp 与 SIMT 分支发散/重汇合；
-- RV32I/M、浮点执行和 RVV 向量执行流水线；
-- 统一计算/着色执行，以及光栅化、透视插值、纹理和深度测试；
-- 软件分配的 command、color、depth 和 texture buffers，无 GPU 本地 VRAM；
-- AXI 控制接口、共享内存数据路径、完成中断与 Linux DRM/KMS 驱动；
-- 从 RTL 到 QEMU、Linux 驱动和 userspace page flip 的端到端验证。
+- 参数化硬件 warp 与 SIMT 分支发散/重汇合，round-robin 调度；
+- RV32I/M、F/D/Zfh 浮点（FMA/sign-inject/minmax/compare/classify/bit-move/转换) 与 RVV 向量流水线（含 FP 异常 fflags 累积、物理向量寄存器文件）；
+- 统一计算/着色执行，光栅化、透视插值、纹理（可编程 `vtex.sample`）、MSAA 1x/2x/4x 与 resolve、深度/模板测试；
+- Sv32 私有 VA 窗口 + ASID、图形与 CU 翻译、TLB 刷新与 ASID 隔离，host vertex→fragment 翻译与指令 fault 恢复；
+- 统一命令与描述符获取、DMA（blit/strided/copy/fill/resolve/invalidate）、共享 L1/L2 与 host 物理内存，无 GPU 本地 VRAM；
+- AXI 控制从机 + 内存主机、完成/错误中断与硬件 vblank IRQ（SCANOUT 周期门控，30Hz 对齐 ARTI refresh）；
+- Linux DRM/KMS 驱动（GEM/fence/scheduler/display takeover、atomic modeset/page flip）、userspace `pipe_opengpu` 与 `triangle_present`/`pipe_present` render-to-KMS 演示；
+- 从 RTL 到 QEMU/Linux 驱动与 userspace 的端到端验证，Debian console 启动，FlashSim/Verilator 双后端（默认 8 线程 Verilator）。
+
+物理进展见 [`timing/README.md`](https://github.com/OpenGPGPU/gpu/blob/main/timing/README.md)：独立 FMA lane 已过 1 GHz 综合（1193 MHz, +162 ps），集成 `GpuSystem` 约 913 MHz 仍未收敛，`strided-copy` 后端路由已通。
 
 ## 从哪里开始
 
@@ -68,21 +73,23 @@ sbt test
 
 ```bash
 cd gpu
-./scripts/run_arti_gpu.sh
+./scripts/run_arti_gpu.sh              # 默认 8 线程 Verilator
+GPU_SIM=flashsim ./scripts/run_arti_gpu.sh  # FlashSim 后端（~3× wall-clock）
+./scripts/run_arti_debian.sh           # Debian console + display 演示
 ```
 
-这条链路会生成 GPU 顶层 RTL，借助 ARTI 构建嵌入 Verilator 模型的 QEMU，启动
-Linux，加载 GPU 驱动，并验证渲染、GEM、atomic modeset 与 page flip。
+这条链路会生成 GPU 顶层 RTL，借助 ARTI 构建嵌入 Verilator/FlashSim 模型的 QEMU，启动
+Linux，加载 GPU 驱动，并验证渲染、GEM、atomic modeset、page flip 与 display scanout。
 
 ## 开发方向
 
 我们正在围绕以下方向持续推进：
 
-- 扩展 RVV、浮点和 GPU 图形指令覆盖；
-- 完善 shader、texture、kernarg 与 GEM 资源绑定；
-- 改进任务队列、同步、内存层次和渲染吞吐；
-- 推进综合、时序收敛、PPA 优化和物理实现；
-- 建立更完整的 Linux 图形软件栈与全系统回归。
+- 扩展 RVV/浮点与 GPU 图形指令覆盖，补齐 shader 纹理/kernarg 与 GEM 绑定；
+- 完善 MSAA resolve 私有 DMA VA、上下文 ASID 隔离与 translation pending 队列；
+- 改进任务队列、同步、内存层次与渲染吞吐，落地 `pipe_opengpu` Gallium 化与 present 路径；
+- 推进综合、时序收敛与 PPA（FMA 已达标，集成系统仍需收敛）及物理实现；
+- 建立更完整的 Linux 图形软件栈、Debian 演示与全系统回归（含 FlashSim/Verilator A/B 对比）。
 
 想了解实现细节，请从 **[gpu](https://github.com/OpenGPGPU/gpu)** 开始；全系统
 集成、EDA 验证与快速 RTL 仿真分别参见 [ARTI](https://github.com/OpenGPGPU/arti)、
