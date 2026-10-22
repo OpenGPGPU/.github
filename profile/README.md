@@ -1,97 +1,111 @@
 # OpenGPGPU
 
-**构建可验证、可运行 Linux 的 RISC-V SIMT GPU。**
+**An open RISC-V SIMT GPU that draws a Linux desktop.**
 
-OpenGPGPU 以 GPU 硬件为核心，覆盖从 Chisel RTL、SIMT 计算与图形流水线，
-到 Linux DRM 驱动、QEMU 全系统仿真和 EDA 验证的完整开发链路。
+OpenGPGPU is the hardware, the Linux graphics stack, and the tools that run and check them. The GPU is Chisel RTL. A Debian ARM64 guest boots it under QEMU, and Weston presents pixels the RTL rendered.
 
-## 核心项目
+## Current proof
 
-| 项目 | 定位 | 主要内容 | 语言 |
-|---|---|---|---|
-| **[gpu](https://github.com/OpenGPGPU/gpu)** | RISC-V SIMT GPU 主项目 | Chisel 7.x RTL，RV32IMF + RVV 向量与浮点流水线；统一着色（vertex/fragment 复用 SIMT）+ 固定功能（clip/raster/插值/output merger/depth-stencil-blend）、Sv32 私有 VA/ASID 与图形 TLB、统一命令（render/compute/copy/fill/blit/strided/resolve/invalidate）、L1/L2 + 共享内存；Linux DRM/KMS 含硬件 vblank IRQ、render-to-KMS present（triangle_present/pipe_present + pipe_opengpu Gallium 雏形）、Debian console（64×64 scanout）、MSAA 1x/2x/4x 与 resolve；默认 8 线程 Verilator，支持 FlashSim 双后端 | Scala |
-| **[FlashSim](https://github.com/OpenGPGPU/FlashSim)** | 周期精确 RTL 仿真器 | 基于 CIRCT（firtool/circt-opt/circt-verilog）导入 HW/Comb/Seq 并生成可跳过空闲组合锥的 C++；与 Verilator 逐周期对齐，低活度下数倍至数十倍加速（GpuSystem / GpuHostAxi 等切片详见仓库单测表）；通过顶层门需求提升、兄弟 &/\| 前缀 CSE、NBA 右侧 dmux 分块等优化，可替代 Verilator 嵌入 ARTI/QEMU；在 ARTI 真实 QEMU+Linux 链路（probe 自测为 go/no-go）上快于 Verilator 嵌入 QEMU，最新 wall-clock 以仓库实测为准 | Python/C++ |
-| **[arti](https://github.com/OpenGPGPU/arti)** | RTL 到全系统仿真 | 自动识别 AXI4/AXI-Lite/APB/AHB/AXI-Stream 并生成 SystemC/Verilator 与 QEMU 嵌入模型；自动发现 IRQ 并接线至 GIC + 100μs 轮询；支持 guest-memory 动态 scanout（BASE/stride/control/宽高寄存器、refresh 定时、RGBA 转换）、固定 VRAM simple-framebuffer、console 启动；默认 8 线程 Verilator、Debian cloud-init、外部驱动 KO 依赖自动载入、present 自动演示与 ARTI/FlashSim 后端对比 | Python |
-| **[chipagent](https://github.com/OpenGPGPU/chipagent)** | EDA 工具服务层 | 56 个 MCP 工具封装 Yosys/OpenSTA/OpenROAD 等真实工具；覆盖综合、ASAP7 ORFS 到 DEF/GDS、post-route STA、仿真/波形事务分析、对齐检查与 PPA 评估；支持 SV 参数 DSE、多文件 RTL、macro GDS/固定布局、按子串定点 high-fanout 拆分、时钟端口自探测与 Docker/host 双执行 | Python |
+The checked-in proof is the OpenGPU GTK smoke application on a 640×480 Weston desktop. Its GtkGLArea draws through the OpenGPU Mesa/Gallium driver (`opengpu_dri.so`) and OpenGPU RTL in FlashSim, using four shared compute units of 16 lanes each. `gpu_drv.ko` presents that guest-memory scanout in the QEMU window. The path does not replace a failed render with a CPU-painted frame.
 
-## GPU 架构
+![OpenGPU GTK smoke on a 640×480 Weston desktop](https://github.com/OpenGPGPU/gpu/raw/main/docs/images/opengpu-gtk-smoke-640x480.png)
 
-主 GPU 采用统一着色器与独立固定功能单元相结合的架构：计算和着色程序运行在
-同一组 RISC-V SIMT lanes 上，几何处理、光栅化、纹理采样和输出合并由专用 RTL
-完成。
+The [2026-10-17 qualification report](https://github.com/OpenGPGPU/gpu/blob/main/docs/performance/packed-white-modulation-main-qualification-2026-10-17.json) records passing idle and active GTK frame checks and scanout verification. Work landed on 2026-10-22 records that presentation gate as passed, distributes compute grids across the shared compute units, and qualifies native SIMT join fault recovery.
 
 ```text
-Linux / DRM userspace ── pipe_opengpu / triangle_present
-         │
-Linux DRM/KMS driver ── MMIO + IRQ(vblank/completion) + shared memory
-         │
-   AXI host interface (control) + AXI memory master
-         │
-┌───────▼──────────────────────────────────────────────┐
-│                    OpenGPGPU                         │
-│                                                     │
-│  Command buffer ──► Geometry ──► Rasterizer         │
-│                            │              │          │
-│                            ▼              ▼          │
-│                RISC-V SIMT shader cores ──► Texture │
-│                            │              │          │
-│                            └──────────────► Output   │
-│                                      merger / depth │
-│                                                     │
-│           Shared L1/L2 and host physical memory     │
-└─────────────────────────────────────────────────────┘
-         │
-  ARTI guest-memory GraphicHwOps ── QEMU scanout
+Weston / Wayland
+        │
+Mesa EGL + OpenGPU Gallium (opengpu_dri.so)
+        │
+Linux gpu_drv.ko  ·  DRM/KMS ioctls, GEM, fences
+        │
+ARTI full-system model + OpenGPU RTL (FlashSim or Verilator)
+        │
+guest GEM framebuffer and scanout registers
+        │
+QEMU display window
 ```
 
-当前实现重点包括：
+Broader stock GTK and Qt shader coverage is still follow-up work. The smoke application and the Weston shell are the qualified desktop path.
 
-- 参数化硬件 warp 与 SIMT 分支发散/重汇合，round-robin 调度；
-- RV32I/M、F/D/Zfh 浮点（FMA/sign-inject/minmax/compare/classify/bit-move/转换) 与 RVV 向量流水线（含 FP 异常 fflags 累积、物理向量寄存器文件）；
-- 统一计算/着色执行，光栅化、透视插值、纹理（可编程 `vtex.sample`）、MSAA 1x/2x/4x 与 resolve、深度/模板测试；
-- Sv32 私有 VA 窗口 + ASID、图形与 CU 翻译、TLB 刷新与 ASID 隔离，host vertex→fragment 翻译与指令 fault 恢复；
-- 统一命令与描述符获取、DMA（blit/strided/copy/fill/resolve/invalidate）、共享 L1/L2 与 host 物理内存，无 GPU 本地 VRAM；
-- AXI 控制从机 + 内存主机、完成/错误中断与硬件 vblank IRQ（SCANOUT 周期门控，30Hz 对齐 ARTI refresh）；
-- Linux DRM/KMS 驱动（GEM/fence/scheduler/display takeover、atomic modeset/page flip）、userspace `pipe_opengpu` 与 `triangle_present`/`pipe_present` render-to-KMS 演示；
-- 从 RTL 到 QEMU/Linux 驱动与 userspace 的端到端验证，Debian console 启动，FlashSim/Verilator 双后端（默认 8 线程 Verilator）。
+## Core projects
 
-物理进展见 [`timing/README.md`](https://github.com/OpenGPGPU/gpu/blob/main/timing/README.md)：独立 FMA lane 已过 1 GHz 综合（1193 MHz, +162 ps），集成 `GpuSystem` 约 913 MHz 仍未收敛，`strided-copy` 后端路由已通。
+| Project | Role | Where it stands | Language |
+|---|---|---|---|
+| **[gpu](https://github.com/OpenGPGPU/gpu)** | RISC-V SIMT GPU, driver, and userspace | Chisel 7.x RTL. RV32 integer, scalar floating point, and selected RVV, with per-warp scheduling, divergence, and reconvergence. Fixed-function clip, raster, interpolation, depth/stencil/blend, texture, and MSAA 1x/2x/4x with resolve. Shared L2, Sv32 translation, and unified compute, render, and DMA commands. Linux DRM/KMS (`gpu_drv.ko`), Mesa/Gallium, and a fatbin loader in `userspace/libopengpu`. Device code comes from the [llvm-project](https://github.com/OpenGPGPU/llvm-project/tree/opengpu) `opengpu` branch. The desktop proof above is the current system gate. | Scala |
+| **[llvm-project](https://github.com/OpenGPGPU/llvm-project/tree/opengpu)** | Device compiler | Fork of LLVM/Clang. OpenGPU work is on the `opengpu` branch; `main` tracks upstream. The CU ISA is the RISC-V vendor extension `XOpengpu`, triple `opengpu-unknown-none-elf`. `clang --target=opengpu` lowers through the RISC-V backend, and the device ABI turns a kernel return into `cease`. Assembler coverage includes `barrier`, `tex.sample`, `cease`, `vtex.sample`, `vquad.dfdx` / `dfdy`, the custom vector branches, and `join`. Milestones M1–M5 are done. On 2026-10-19 a Verilator guest ran the compiled `kadd` kernel (`1 + 2 + 3 = 6`). The published branch tip is `4d61da24` (2026-10-20). Codegen does not yet select the vector-branch and `join` forms. RTL, the driver, and the desktop build do not need this tree. | C++ |
+| **[FlashSim](https://github.com/OpenGPGPU/FlashSim)** | Cycle-accurate RTL simulator | Imports HW/Comb/Seq through CIRCT and emits C++ that skips idle combinational cones. DUT ports stay cycle-aligned with Verilator. `GpuHostAxi` / `GpuHostSystemAxi` are the QEMU control tops. On the 2026-09-17 OpenGPU probe (3 rounds), mean wall clock was 6.3 s versus 19.0 s for Verilator-linked QEMU (3.0×). On the qualified four-CU desktop model, host dispatch and invalidation changes measured on 2026-10-17 save 8.21% on a fixed Mesa64 trace, and the 640×480 desktop still passes. Scanout costs about 405 ns/tick versus about 11.5 µs/tick for the 8-region Verilator backend. | Python/C++ |
+| **[arti](https://github.com/OpenGPGPU/arti)** | RTL into QEMU | Detects AXI4, AXI-Lite, APB, AHB, and AXI-Stream and builds a SystemC/Verilator project or a model compiled into QEMU. IRQ outputs are wired to the GIC; polling backs off when the model advances no ticks. Integration profiles load an external driver and its `.ko` dependencies. The guest image used by the GPU desktop includes Wayland and libffi (2026-10-21), and each concurrent guest gets its own cloud-init seed. An MCP server can inspect RTL, generate a project, and run the Linux boot as a background job. | Python |
+| **[chipagent](https://github.com/OpenGPGPU/chipagent)** | EDA tools behind MCP | 56 MCP tools wrapping Yosys, OpenSTA, OpenROAD, and related tools. Synthesis, ASAP7 OpenROAD Flow Scripts through DEF/GDS, post-route STA, simulation and waveform checks, register and driver alignment, and PPA estimates marked as estimates. The GPU physical flow calls this from `scripts/qualify_ppa.py`. Latest landed work (2026-09-20) is post-route STA and robustness fixes on the ASAP7 flow, including substring-targeted high-fanout buffering. Untrusted RTL runs in Docker and fails closed when Docker is missing. | Python |
 
-## 从哪里开始
+## GPU architecture
 
-GPU RTL 使用 Scala/Chisel，基础开发需要 Java 和 sbt：
+Compute and shading run on the same RISC-V SIMT lanes. Geometry, rasterization, texture sampling, and output merge are dedicated RTL. Colour and depth live in host DRAM; there is no GPU-local VRAM. The product top, `GpuHostSystemAxi`, has one AXI4 control slave, one AXI4 memory master, and one IRQ.
 
-```bash
+```text
+RISC-V SIMT front-end
+  scalar ALU/FPU + selected RVV + warp control
+              │
+              ▼
+        unified shader core ─────── shared memory / L2 / Sv32
+              │
+              ▼
+       command router and host AXI
+          ┌──────────┴──────────┐
+          ▼                     ▼
+   compute + DMA jobs      render host
+                                │
+                                ▼
+      transform → clip → rasterize → interpolate → depth/blend → scanout
+```
+
+The same command and memory contracts are used by the Scala tests, the small C userspace library, and the Linux driver.
+
+## Getting started
+
+RTL tests need JDK 11+ and sbt. Verilator is required for the simulation-backed suite.
+
+```sh
 git clone https://github.com/OpenGPGPU/gpu.git
 cd gpu
 sbt compile
 sbt test
 ```
 
-运行完整的 RTL + QEMU + Linux + DRM 集成测试时，将 `gpu` 与 `arti` 放在同一
-目录下，然后执行：
+The desktop path is separate. It needs sibling `arti` and `FlashSim` checkouts and the GTK Debian image described in the gpu repo's [GTK coverage notes](https://github.com/OpenGPGPU/gpu/blob/main/docs/GTK_COVERAGE.md). For device code, check out the compiler on its OpenGPU branch:
 
-```bash
-cd gpu
-./scripts/run_arti_gpu.sh              # 默认 8 线程 Verilator
-GPU_SIM=flashsim ./scripts/run_arti_gpu.sh  # FlashSim 后端（详见 FlashSim README 实测）
-./scripts/run_arti_debian.sh           # Debian console + display 演示
+```sh
+git clone -b opengpu https://github.com/OpenGPGPU/llvm-project.git
 ```
 
-这条链路会生成 GPU 顶层 RTL，借助 ARTI 构建嵌入 Verilator/FlashSim 模型的 QEMU，启动
-Linux，加载 GPU 驱动，并验证渲染、GEM、atomic modeset、page flip 与 display scanout。
+Status of that toolchain is in the gpu repo's [LLVM plan](https://github.com/OpenGPGPU/gpu/blob/main/docs/LLVM_TOOLCHAIN_PLAN.md).
 
-## 开发方向
+```sh
+scripts/build_arti_debian_display.sh
+bash scripts/build_mesa_opengpu.sh
 
-我们正在围绕以下方向持续推进：
+OPENGPU_AUTO_DISPLAY=weston \
+DEBIAN_BASE=../arti-work/debian-gtk-arm64.qcow2 \
+DISK="$PWD/arti-weston-current.qcow2" \
+REBUILD_DISK=0 \
+REBUILD_CLOUDINIT=1 \
+GPU_SIM=flashsim \
+QEMU_DISPLAY=cocoa \
+bash scripts/run_arti_debian.sh
+```
 
-- 扩展 RVV/浮点与 GPU 图形指令覆盖，补齐 shader 纹理/kernarg 与 GEM 绑定；
-- 完善 MSAA resolve 私有 DMA VA、上下文 ASID 隔离与 translation pending 队列；
-- 改进任务队列、同步、内存层次与渲染吞吐，落地 `pipe_opengpu` Gallium 化与 present 路径；
-- 推进综合、时序收敛与 PPA（FMA 已达标，集成系统仍需收敛）及物理实现；
-- 建立更完整的 Linux 图形软件栈、Debian 演示与全系统回归（含 FlashSim/Verilator A/B 对比）。
+FlashSim is cycle-accurate, and a compositor frame can take minutes. An upright Weston clock and launcher in the QEMU window, plus completed fence-backed draws in the serial log, is the success condition. `scripts/qualify_functional.sh` is the local release gate: the Scala suite, host script tests, and both ARTI guest DRM paths.
 
-想了解实现细节，请从 **[gpu](https://github.com/OpenGPGPU/gpu)** 开始；全系统
-集成、EDA 验证与快速 RTL 仿真分别参见 [ARTI](https://github.com/OpenGPGPU/arti)、
-[ChipAgent](https://github.com/OpenGPGPU/chipagent) 和
-[FlashSim](https://github.com/OpenGPGPU/FlashSim)。
+## Physical design
+
+Status lives in [`timing/README.md`](https://github.com/OpenGPGPU/gpu/blob/main/timing/README.md). A standalone FP32 FMA lane meets 1 GHz at synthesis (`fma-lane-cspipe`: 1193.57 MHz, +162.17 ps). Integrated `GpuHostSystemAxi` does not: the retained synthesis result is 905.83 MHz (−103.97 ps), and the best measured intermediate is 912.80 MHz. `strided-copy` finishes routing with clean DRC, antenna, and hold; post-route timing is still open (committed baseline 505.06 MHz). A finished tool run is not timing closure, and several of the faster rows were measured on uncommitted RTL.
+
+## Where the work is now
+
+- Cut FlashSim wall-clock time on the desktop workload before widening shader coverage. Correctness stays on the same GTK pixel and scanout checks.
+- Widen Gallium and shader coverage for stock GTK and Qt clients, and keep RVV, the memory system, and multiple render targets moving.
+- Keep multi-CU compute honest: grids now distribute across the shared compute units, and new shader behavior still has to match the single-CU result.
+- Close timing on the integrated top. The FMA lane already meets 1 GHz at synthesis; `GpuHostSystemAxi` does not, and the faster synthesis rows still need a clean committed baseline plus post-route STA.
+- Keep the `opengpu` LLVM branch matched to the CU ISA. An encoding or shader-ABI change has to land in both repositories.
+
+Start with **[gpu](https://github.com/OpenGPGPU/gpu)** for the hardware, driver, and desktop procedure. The device compiler is [llvm-project](https://github.com/OpenGPGPU/llvm-project/tree/opengpu) (`opengpu`). Full-system boot is [ARTI](https://github.com/OpenGPGPU/arti), fast RTL simulation is [FlashSim](https://github.com/OpenGPGPU/FlashSim), and physical-flow tools are [ChipAgent](https://github.com/OpenGPGPU/chipagent).
